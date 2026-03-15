@@ -88,3 +88,16 @@ __winfnc BOOL ConvertStringSecurityDescriptorToSecurityDescriptorW(const char16_
     return TRUE;
 }
 WINAPI(ConvertStringSecurityDescriptorToSecurityDescriptorW)
+// Power setting notification stub - HP driver needs this
+__winfnc ULONG PowerSettingRegisterNotification(const GUID *setting_guid, ULONG flags, HANDLE recipient, HANDLE *registration_handle) {
+    log_debug("PowerSettingRegisterNotification called - stubbed");
+    if(registration_handle) *registration_handle = INVALID_HANDLE_VALUE;
+    return 0; // ERROR_SUCCESS
+}
+WINAPI(PowerSettingRegisterNotification)
+
+__winfnc ULONG PowerSettingUnregisterNotification(HANDLE registration_handle) {
+    log_debug("PowerSettingUnregisterNotification called - stubbed");
+    return 0;
+}
+WINAPI(PowerSettingUnregisterNotification)

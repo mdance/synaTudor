@@ -363,3 +363,24 @@ __winfnc NTSTATUS WdfDeviceRetrieveDeviceInterfaceString(WDF_DRIVER_GLOBALS *glo
     return STATUS_SUCCESS;
 }
 WDFFUNC(WdfDeviceRetrieveDeviceInterfaceString, 29)
+
+__winfnc NTSTATUS WdfDeviceAssignInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG type, ULONG buffer_length, void *property_buffer) {
+    log_debug("WdfDeviceAssignInterfaceProperty called [type=%lu len=%lu] - stubbed", type, buffer_length);
+    return STATUS_SUCCESS;
+}
+WDFFUNC(WdfDeviceAssignInterfaceProperty, 50)
+
+__winfnc NTSTATUS WdfDeviceAllocAndQueryInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG pool_type, WDF_OBJECT_ATTRIBUTES *property_memory_attrs, WDFOBJECT *property_memory, ULONG *type) {
+    log_debug("WdfDeviceAllocAndQueryInterfaceProperty called - stubbed");
+    if(type) *type = 0;
+    return 0xC0000225;
+}
+WDFFUNC(WdfDeviceAllocAndQueryInterfaceProperty, 51)
+
+__winfnc NTSTATUS WdfDeviceQueryInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG buffer_length, void *property_buffer, ULONG *result_length, ULONG *type) {
+    log_debug("WdfDeviceQueryInterfaceProperty called - stubbed");
+    if(result_length) *result_length = 0;
+    if(type) *type = 0;
+    return 0xC0000225;
+}
+WDFFUNC(WdfDeviceQueryInterfaceProperty, 52)

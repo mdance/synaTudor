@@ -4,6 +4,7 @@
 
 __winfnc BOOL CryptAcquireContextA(struct crypt_provider **prov, const char *cont_name, const char *prov_name, DWORD prov_type, DWORD flags) {
     switch(prov_type) {
+        case PROV_RSA_FULL: *prov = &crypt_prov_rsa_aes; return TRUE;
         case PROV_RSA_AES: *prov = &crypt_prov_rsa_aes; return TRUE;
         default: {
             log_warn("CryptAcquireContextA | Couldn't find provider for container '%s' provider '%s' provider type 0x%x flags 0x%x", cont_name, prov_name, prov_type, flags);
@@ -265,3 +266,15 @@ __winfnc BOOL CryptGenRandom(HANDLE prov, DWORD len, BYTE *buf) {
     return TRUE;
 }
 WINAPI(CryptGenRandom)
+
+// Wide version of CryptAcquireContext - HP driver uses this
+__winfnc BOOL CryptAcquireContextW(struct crypt_provider **prov, const char16_t *cont_name, const char16_t *prov_name, DWORD prov_type, DWORD flags) {
+    // Convert to ASCII and delegate to the A version
+    char *cont_a = cont_name ? winstr_to_str(cont_name) : NULL;
+    char *prov_a = prov_name ? winstr_to_str(prov_name) : NULL;
+    BOOL result = CryptAcquireContextA(prov, cont_a, prov_a, prov_type, flags);
+    free(cont_a);
+    free(prov_a);
+    return result;
+}
+WINAPI(CryptAcquireContextW)
