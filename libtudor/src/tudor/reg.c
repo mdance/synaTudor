@@ -8,7 +8,7 @@ bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const cha
 
     //Handle MachineGuid - used by driver for crypto key derivation
     if(!is_write && strcmp(key_name, "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography") == 0 && strcmp(val_name, "MachineGuid") == 0) {
-        const char *guid = "c66899eb-07ba-49cd-8c72-f238e26827df";
+        const char *guid = "00000000-0000-0000-0000-000000000000";
         size_t guid_len = strlen(guid) + 1;
         if(buf && *buf_size >= guid_len) {
             memcpy(buf, guid, guid_len);
