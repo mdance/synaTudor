@@ -38,6 +38,7 @@ struct tudor_device_state {
     bool pairing_in_process, unpairing_in_process;
     bool update_in_process;
     int init_fails, update_fails;
+    int ownership_fails, sensor_lock_fails;
     uint32_t last_update_timestamp;
 };
 
@@ -96,6 +97,17 @@ bool tudor_close(struct tudor_device *device);
 
 int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_finger finger);
 bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, const void *data, size_t data_size);
+
+//Wipe the sensor's on-device template database by injecting the EraseDatabase
+//IOCTL (0x442028, recovered by RE'ing synaFpAdapter111.dll). The host-side
+//storage adapter never forwards deletes to the device, so on-device templates
+//accumulate until the partition is full (WINBIO_E_DATABASE_FULL on enroll).
+bool tudor_erase_db(struct tudor_device *device);
+
+//Register a just-enrolled on-device template under a host identity (IOCTL
+//0x442018) so the on-chip matcher can find it. Mirrors the DLL's native
+//StorageAdapterAddRecord, which synaTudor's host-only storage adapter omits.
+bool tudor_register_ondevice_template(struct tudor_device *device, WINBIO_IDENTITY *identity, unsigned char subfactor, const void *blob, size_t blob_size);
 
 bool tudor_enroll_start(struct tudor_device *device, RECGUID guid, enum tudor_finger finger);
 bool tudor_enroll_capture(struct tudor_device *device, bool *done, tudor_async_res_t *res);

@@ -10,6 +10,8 @@ tudor_tod_src = [
 ]
 
 libfprint_tod_dep = dependency('libfprint-2-tod-1')
+libfprint_dep = dependency('libfprint-2')
+gio_unix_dep = dependency('gio-unix-2.0')
 udev_dep = dependency('udev')
 libusb_dep = dependency('libusb-1.0')
 gusb_dep = dependency('gusb')
@@ -18,7 +20,7 @@ json_glib_dep = dependency('json-glib-1.0')
 tudor_tod = shared_module('tudor_tod',
     sources: tudor_tod_src,
     c_args: ['-D_GNU_SOURCE', '-Wno-missing-braces'],
-    dependencies: [libfprint_tod_dep, libusb_dep, gusb_dep, json_glib_dep],
+    dependencies: [libfprint_tod_dep, libfprint_dep, gio_unix_dep, libusb_dep, gusb_dep, json_glib_dep],
     include_directories: [libtudor_inc, tudor_host_inc, tudor_host_launcher_inc],
     install: true,
     install_dir: libfprint_tod_dep.get_variable(pkgconfig: 'tod_driversdir')

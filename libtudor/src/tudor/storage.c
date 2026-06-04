@@ -72,11 +72,28 @@ __winfnc static HRESULT storage_NOP() {
     return ERROR_SUCCESS;
 }
 
+//Named logging NOPs so we can see exactly which storage adapter slots the DLL
+//calls (the bare storage_NOP is shared across ~11 vtable slots and is invisible).
+#define STORAGE_LOG_NOP(name) __winfnc static HRESULT storage_log_##name() { log_verbose("WINBIO storage | " #name "() called"); return ERROR_SUCCESS; }
+STORAGE_LOG_NOP(Attach)
+STORAGE_LOG_NOP(Detach)
+STORAGE_LOG_NOP(ClearContext)
+STORAGE_LOG_NOP(NotifyPowerChange)
+STORAGE_LOG_NOP(PipelineInit)
+STORAGE_LOG_NOP(PipelineCleanup)
+STORAGE_LOG_NOP(Activate)
+STORAGE_LOG_NOP(Deactivate)
+STORAGE_LOG_NOP(NotifyDatabaseChange)
+STORAGE_LOG_NOP(UpdateRecordBegin)
+STORAGE_LOG_NOP(UpdateRecordCommit)
+
 __winfnc static HRESULT storage_ControlUnit() {
+    log_verbose("WINBIO storage | ControlUnit() called");
     return E_INVALIDARG;
 }
 
 __winfnc static HRESULT storage_QueryExtendedInfo(WINBIO_PIPELINE *pipeline, WINBIO_EXTENDED_STORAGE_INFO *info, SIZE_T info_size) {
+    log_verbose("WINBIO storage | QueryExtendedInfo(info_size=%lu) called", info_size);
     if(sizeof(WINBIO_EXTENDED_STORAGE_INFO) > info_size) return E_INVALIDARG;
     info->GenericStorageCapabilities = WINBIO_CAPABILITY_MATCHING;
     info->Factor = WINBIO_TYPE_FINGERPRINT;
@@ -86,6 +103,21 @@ __winfnc static HRESULT storage_QueryExtendedInfo(WINBIO_PIPELINE *pipeline, WIN
 
 __winfnc static HRESULT storage_AddRecord(WINBIO_PIPELINE *pipeline, WINBIO_STORAGE_RECORD *srec) {
     struct tudor_device *dev = (struct tudor_device*) pipeline->StorageContext;
+
+    //DIAGNOSTIC: dump exactly what the DLL passes us, BEFORE any validation, so we
+    //can see whether it hands us a real on-device template handle as TemplateBlob.
+    if(LOG_LEVEL <= LOG_VERBOSE) {
+        cant_fail_ret(pthread_mutex_lock(&LOG_LOCK));
+        printf("[ADDREC] guid=%08x subfactor=%x idxcount=%u TemplateBlobSize=%lu Template=",
+            srec->Identity->TemplateGuid.PartA, srec->SubFactor, srec->IndexElementCount, srec->TemplateBlobSize);
+        if(srec->TemplateBlob && srec->TemplateBlobSize) { for(SIZE_T i = 0; i < srec->TemplateBlobSize; i++) printf("%02x", srec->TemplateBlob[i]); }
+        else printf("(none)");
+        printf(" PayloadBlobSize=%lu Payload=", srec->PayloadBlobSize);
+        if(srec->PayloadBlob && srec->PayloadBlobSize) { for(SIZE_T i = 0; i < srec->PayloadBlobSize; i++) printf("%02x", srec->PayloadBlob[i]); }
+        else printf("(none)");
+        puts("");
+        cant_fail_ret(pthread_mutex_unlock(&LOG_LOCK));
+    }
 
     //Validate record
     if(srec->Identity->Type != WINBIO_ID_TYPE_GUID) return E_INVALIDARG;
@@ -123,20 +155,35 @@ __winfnc static HRESULT storage_AddRecord(WINBIO_PIPELINE *pipeline, WINBIO_STOR
 
     rec->guid = *(RECGUID*) &srec->Identity->TemplateGuid;
     rec->finger = (enum tudor_finger) srec->SubFactor;
-    rec->data = malloc(srec->TemplateBlobSize);
-    rec->data_size = srec->TemplateBlobSize;
+
+    // For on-device storage (Prometheus), the DLL provides TemplateBlobSize=0.
+    // Store a 1-byte placeholder so IdentifyFeatureSet includes this record's
+    // GUID in the 0x442058 identify payload (count=0 causes "no match").
+    size_t store_size = srec->TemplateBlobSize > 0 ? srec->TemplateBlobSize : 1;
+    rec->data = malloc(store_size);
+    rec->data_size = store_size;
     if(!rec->data) {
         HRESULT hr = winerr_from_errno();
         free(rec);
         cant_fail_ret(pthread_mutex_unlock(&dev->records_lock));
         return hr;
     }
-    memcpy(rec->data, srec->TemplateBlob, rec->data_size);
+    memset(rec->data, 0, store_size);
+    if(srec->TemplateBlobSize > 0) memcpy(rec->data, srec->TemplateBlob, srec->TemplateBlobSize);
 
     if(dev->records_head) dev->records_head->prev = rec;
     dev->records_head = rec;
 
     cant_fail_ret(pthread_mutex_unlock(&dev->records_lock));
+
+    //Register the on-device template under this identity (IOCTL 0x442018) so the
+    //on-chip matcher can find it. The DLL's native StorageAdapterAddRecord does
+    //this; the host-only adapter historically didn't, causing identify/verify to
+    //return NO_RESULTS. Done outside records_lock (it talks to the device).
+    if(!tudor_register_ondevice_template(dev, srec->Identity, srec->SubFactor, srec->TemplateBlob, srec->TemplateBlobSize)) {
+        log_warn("Couldn't register template on-device; identify may not match this finger");
+    }
+
     return ERROR_SUCCESS;
 }
 
@@ -293,9 +340,9 @@ WINBIO_STORAGE_INTERFACE *tudor_storage_adapter = &(WINBIO_STORAGE_INTERFACE) {
     .Version = { 5, 0 },
     .Type = 3,
     .Size = sizeof(WINBIO_STORAGE_INTERFACE),
-    .Attach = storage_NOP,
-    .Detach = storage_NOP,
-    .ClearContext = storage_NOP,
+    .Attach = (void*) storage_log_Attach,
+    .Detach = (void*) storage_log_Detach,
+    .ClearContext = (void*) storage_log_ClearContext,
     .CreateDatabase = storage_NOTIMPL,
     .EraseDatabase = storage_NOTIMPL,
     .OpenDatabase = storage_NOTIMPL,
@@ -312,15 +359,15 @@ WINBIO_STORAGE_INTERFACE *tudor_storage_adapter = &(WINBIO_STORAGE_INTERFACE) {
     .GetCurrentRecord = storage_GetCurrentRecord,
     .ControlUnit = storage_ControlUnit,
     .ControlUnitPrivileged = storage_ControlUnit,
-    .NotifyPowerChange = (IBIO_SENSOR_NOTIFY_POWER_CHANGE_FN*) storage_NOP,
-    .PipelineInit = storage_NOP,
-    .PipelineCleanup = storage_NOP,
-    .Activate = storage_NOP,
-    .Deactivate = storage_NOP,
+    .NotifyPowerChange = (IBIO_SENSOR_NOTIFY_POWER_CHANGE_FN*) storage_log_NotifyPowerChange,
+    .PipelineInit = (void*) storage_log_PipelineInit,
+    .PipelineCleanup = (void*) storage_log_PipelineCleanup,
+    .Activate = (void*) storage_log_Activate,
+    .Deactivate = (void*) storage_log_Deactivate,
     .QueryExtendedInfo = storage_QueryExtendedInfo,
-    .NotifyDatabaseChange = (IBIO_STORAGE_NOTIFY_DATABASE_CHANGE_FN*) storage_NOP,
+    .NotifyDatabaseChange = (IBIO_STORAGE_NOTIFY_DATABASE_CHANGE_FN*) storage_log_NotifyDatabaseChange,
     .GetUserState = NULL, //Reserved1
     .IncrementUserState = NULL, //Reserved2
-    .UpdateRecordBegin = (IBIO_STORAGE_UPDATE_RECORD_BEGIN_FN*) storage_NOP,
-    .UpdateRecordCommit = (IBIO_STORAGE_UPDATE_RECORD_COMMIT_FN*) storage_NOP
+    .UpdateRecordBegin = (IBIO_STORAGE_UPDATE_RECORD_BEGIN_FN*) storage_log_UpdateRecordBegin,
+    .UpdateRecordCommit = (IBIO_STORAGE_UPDATE_RECORD_COMMIT_FN*) storage_log_UpdateRecordCommit
 };

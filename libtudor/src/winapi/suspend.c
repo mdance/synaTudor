@@ -19,3 +19,14 @@ __winfnc DWORD PowerUnregisterSuspendResumeNotification(HANDLE handle) {
     return ERROR_SUCCESS;
 }
 WINAPI(PowerUnregisterSuspendResumeNotification)
+
+__winfnc DWORD PowerSettingRegisterNotification(const GUID *setting_guid, DWORD flags, HANDLE recipient, HANDLE *out) {
+    if(out) *out = NULL;
+    return ERROR_SUCCESS;
+}
+WINAPI(PowerSettingRegisterNotification)
+
+__winfnc DWORD PowerSettingUnregisterNotification(HANDLE handle) {
+    return ERROR_SUCCESS;
+}
+WINAPI(PowerSettingUnregisterNotification)

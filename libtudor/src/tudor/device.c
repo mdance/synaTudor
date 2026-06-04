@@ -55,6 +55,88 @@ static void tudor_cleanup(struct tudor_device *device, OVERLAPPED *ovlp, struct 
     winwdf_destroy_object((WDFOBJECT) req);
 }
 
+bool tudor_erase_db(struct tudor_device *device) {
+    //Inject the on-device "StorageAdapterEraseDatabase" IOCTL (code 0x442028,
+    //recovered by RE'ing synaFpAdapter111.dll). This goes through the exact same
+    //winwdf_devctrl_file path as every DLL-issued DEVCTRL, so synaWudfBioUsb wraps
+    //and sends it to the sensor for us - no need to touch the TLS layer.
+    uint8_t out_buf[16];
+    memset(out_buf, 0, sizeof(out_buf));
+
+    struct winmodule *mod = winmodule_get_cur();
+    winmodule_set_cur(&tudor_driver_dll->module);
+
+    struct winwdf_request *req = NULL;
+    NTSTATUS status = winwdf_devctrl_file(device->wdf_file, 0x442028, NULL, 0, out_buf, sizeof(out_buf), &req);
+    if(status != STATUS_SUCCESS) {
+        winmodule_set_cur(mod);
+        log_error("Error starting on-device erase DEVCTRL: 0x%x!", status);
+        return false;
+    }
+
+    NTSTATUS wait_status = winwdf_wait_request(req);
+
+    ULONG_PTR num_transfered = 0;
+    winwdf_get_request_info(req, NULL, NULL, NULL, NULL, NULL, &num_transfered);
+
+    winwdf_destroy_object((WDFOBJECT) req);
+    winmodule_set_cur(mod);
+
+    if(wait_status != STATUS_SUCCESS) {
+        log_error("On-device erase DEVCTRL failed: 0x%x!", wait_status);
+        return false;
+    }
+
+    log_info("On-device template database erased [out %lu bytes: %02x%02x%02x%02x]", (unsigned long) num_transfered, out_buf[0], out_buf[1], out_buf[2], out_buf[3]);
+    return true;
+}
+
+bool tudor_register_ondevice_template(struct tudor_device *device, WINBIO_IDENTITY *identity, unsigned char subfactor, const void *blob, size_t blob_size) {
+    //Replicates the DLL's native StorageAdapterAddRecord (recovered by RE): it
+    //sends IOCTL 0x442018 to register the just-enrolled on-device template under
+    //a host identity so the on-chip matcher (0x442058) can find it. synaTudor's
+    //host-only storage adapter skips this, so identify/verify return NO_RESULTS.
+    //Request layout (from disasm @0x18000aa28+):
+    //  +0x00 WINBIO_IDENTITY (0x4c)  +0x4c UCHAR subfactor
+    //  +0x50 u64 blob_size           +0x58 blob[blob_size]
+    size_t in_size = blob_size > 0 ? blob_size + 0x5f : 0x60;
+    uint8_t *in_buf = (uint8_t*) calloc(1, in_size);
+    if(!in_buf) { perror("Couldn't allocate template register buffer"); return false; }
+    memcpy(in_buf + 0x00, identity, 0x4c);
+    in_buf[0x4c] = subfactor;
+    *(uint64_t*) (in_buf + 0x50) = (uint64_t) blob_size;
+    if(blob && blob_size) memcpy(in_buf + 0x58, blob, blob_size);
+
+    uint8_t out_buf[8] = {0};
+
+    struct winmodule *mod = winmodule_get_cur();
+    winmodule_set_cur(&tudor_driver_dll->module);
+
+    struct winwdf_request *req = NULL;
+    NTSTATUS status = winwdf_devctrl_file(device->wdf_file, 0x442018, in_buf, in_size, out_buf, sizeof(out_buf), &req);
+    if(status != STATUS_SUCCESS) {
+        winmodule_set_cur(mod);
+        free(in_buf);
+        log_error("Error starting on-device template register DEVCTRL: 0x%x!", status);
+        return false;
+    }
+
+    NTSTATUS wait_status = winwdf_wait_request(req);
+    winwdf_destroy_object((WDFOBJECT) req);
+    winmodule_set_cur(mod);
+    free(in_buf);
+
+    if(wait_status != STATUS_SUCCESS) {
+        log_error("On-device template register DEVCTRL failed: 0x%x!", wait_status);
+        return false;
+    }
+
+    log_info("Registered on-device template [guid=%08x subfactor=%x blob=%zu out=%02x%02x%02x%02x%02x%02x%02x%02x]",
+        identity->TemplateGuid.PartA, subfactor, blob_size,
+        out_buf[0], out_buf[1], out_buf[2], out_buf[3], out_buf[4], out_buf[5], out_buf[6], out_buf[7]);
+    return true;
+}
+
 bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, struct tudor_device_state *state) {
     HRESULT hres;
     NTSTATUS status;

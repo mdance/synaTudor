@@ -172,6 +172,7 @@ void free_pair_data() {
 }
 
 bool load_datastore_records(FILE *file, struct tudor_device *device) {
+    int loaded = 0;
     while(true) {
         //Check for end of records
         char ind = fgetc(file);
@@ -213,10 +214,13 @@ bool load_datastore_records(FILE *file, struct tudor_device *device) {
             log_error("Duplicate record!");
             return false;
         }
+        log_verbose("Loaded record: guid=%08x... finger=%x data_size=%zu", guid.PartA, finger, data_size);
+        loaded++;
 
         free(data);
     }
 
+    log_verbose("Loaded %d record(s) from data store", loaded);
     return true;
 }
 

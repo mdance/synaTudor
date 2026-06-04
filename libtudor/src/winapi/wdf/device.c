@@ -106,6 +106,16 @@ struct dev_queue_node {
     struct winwdf_queue *queue;
 };
 
+//A stored device property value (WdfDeviceAssign/Query*Property). The key is a
+//DEVPROPKEY: a 16-byte fmtid GUID followed by a 4-byte pid (20 bytes total).
+struct dev_prop_node {
+    struct dev_prop_node *next;
+    unsigned char key[20];
+    ULONG type;
+    void *data;
+    ULONG data_len;
+};
+
 struct winwdf_device {
     struct wdf_object object;
     struct winwdf_driver *driver;
@@ -128,6 +138,10 @@ struct winwdf_device {
     //USB
     struct wdf_usb_device *usb_dev;
     libusb_device_handle *libusb_dev;
+
+    //Device properties (KV store for WdfDeviceAssign/Query*Property)
+    pthread_mutex_t props_lock;
+    struct dev_prop_node *props_head;
 };
 
 void winwdf_remove_device(struct winwdf_device *dev) {
@@ -169,6 +183,17 @@ static void device_destr(struct winwdf_device *dev) {
             abort();
         }
     }
+
+    //Free device properties
+    cant_fail_ret(pthread_mutex_lock(&dev->props_lock));
+    while(dev->props_head) {
+        struct dev_prop_node *p = dev->props_head;
+        dev->props_head = p->next;
+        free(p->data);
+        free(p);
+    }
+    cant_fail_ret(pthread_mutex_unlock(&dev->props_lock));
+    cant_fail_ret(pthread_mutex_destroy(&dev->props_lock));
 
     //Free memory
     if(dev->usb_dev) winwdf_destroy_object((WDFOBJECT) dev->usb_dev);
@@ -317,6 +342,9 @@ __winfnc NTSTATUS WdfDeviceCreate(WDF_DRIVER_GLOBALS *globals, struct wdf_device
     dev->usb_dev = NULL;
     dev->libusb_dev = (*dev_init)->usb_dev;
 
+    cant_fail_ret(pthread_mutex_init(&dev->props_lock, NULL));
+    dev->props_head = NULL;
+
     //Enqueue callback call
     wdf_evtqueue_enqueue(&dev->object, (wdf_evtqueue_action_fnc*) device_call_cbs);
 
@@ -364,23 +392,180 @@ __winfnc NTSTATUS WdfDeviceRetrieveDeviceInterfaceString(WDF_DRIVER_GLOBALS *glo
 }
 WDFFUNC(WdfDeviceRetrieveDeviceInterfaceString, 29)
 
-__winfnc NTSTATUS WdfDeviceAssignInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG type, ULONG buffer_length, void *property_buffer) {
-    log_debug("WdfDeviceAssignInterfaceProperty called [type=%lu len=%lu] - stubbed", type, buffer_length);
+typedef enum {
+    WdfFalse = 0,
+    WdfTrue = 1,
+    WdfUseDefault = 2
+} WDF_TRI_STATE;
+
+typedef struct {
+    ULONG Size;
+    WDF_TRI_STATE LockSupported;
+    WDF_TRI_STATE EjectSupported;
+    WDF_TRI_STATE Removable;
+    WDF_TRI_STATE DockDevice;
+    WDF_TRI_STATE UniqueID;
+    WDF_TRI_STATE SilentInstall;
+    WDF_TRI_STATE SurpriseRemovalOK;
+    WDF_TRI_STATE HardwareDisabled;
+    WDF_TRI_STATE NoDisplayInUI;
+    ULONG Address;
+    ULONG UINumber;
+} WDF_DEVICE_PNP_CAPABILITIES;
+
+__winfnc void WdfDeviceSetPnpCapabilities(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, WDF_DEVICE_PNP_CAPABILITIES *caps) {}
+WDFFUNC(WdfDeviceSetPnpCapabilities, 33)
+
+//WDF device property data layouts (64-bit). The PropertyKey is a DEVPROPKEY:
+//16-byte fmtid GUID followed by a 4-byte pid.
+struct tudor_iface_prop_data {
+    ULONG Size;
+    const GUID *InterfaceClassGUID;
+    const void *ReferenceString;
+    const void *PropertyKey;
+    ULONG Lcid;
+    ULONG Flags;
+};
+
+struct tudor_dev_prop_data {
+    ULONG Size;
+    const void *PropertyKey;
+    ULONG Lcid;
+    ULONG Flags;
+};
+
+static void log_dev_prop(const char *fnc, WDFOBJECT device_obj, const void *propkey, ULONG buf_len, const void *buf) {
+    if(LOG_LEVEL > LOG_VERBOSE) return;
+    cant_fail_ret(pthread_mutex_lock(&LOG_LOCK));
+    printf("[PROP] %s dev=%p key=", fnc, device_obj);
+    if(propkey) {
+        const unsigned char *k = (const unsigned char*) propkey;
+        for(int i = 0; i < 16; i++) printf("%02x", k[i]);
+        printf("/pid=%u", *(const ULONG*)(k + 16));
+    } else printf("(null)");
+    printf(" buf_len=%u buf=", buf_len);
+    if(buf && buf_len) { for(ULONG i = 0; i < buf_len; i++) printf("%02x", ((const unsigned char*) buf)[i]); }
+    else printf("(none)");
+    puts("");
+    cant_fail_ret(pthread_mutex_unlock(&LOG_LOCK));
+}
+
+//Per-device key/value property store. Drivers stash state on the WDF device via
+//WdfDeviceAssign*Property and read it back via WdfDeviceQuery*/AllocAndQuery*.
+//The store is keyed on the 20-byte DEVPROPKEY (fmtid GUID + pid).
+static struct dev_prop_node *dev_prop_find(struct winwdf_device *dev, const unsigned char key[20]) {
+    for(struct dev_prop_node *n = dev->props_head; n; n = n->next)
+        if(memcmp(n->key, key, 20) == 0) return n;
+    return NULL;
+}
+
+static void dev_prop_assign(struct winwdf_device *dev, const unsigned char key[20], ULONG type, const void *data, ULONG data_len) {
+    cant_fail_ret(pthread_mutex_lock(&dev->props_lock));
+    struct dev_prop_node *n = dev_prop_find(dev, key);
+    if(!n) {
+        n = (struct dev_prop_node*) malloc(sizeof(struct dev_prop_node));
+        memcpy(n->key, key, 20);
+        n->data = NULL;
+        n->next = dev->props_head;
+        dev->props_head = n;
+    }
+    free(n->data);
+    n->type = type;
+    n->data_len = data_len;
+    n->data = data_len ? malloc(data_len) : NULL;
+    if(data_len) memcpy(n->data, data, data_len);
+    cant_fail_ret(pthread_mutex_unlock(&dev->props_lock));
+}
+
+//Copy a stored property value into a caller buffer. Sets *result_len/*prop_type
+//if non-NULL. Returns SUCCESS if it fit, BUFFER_TOO_SMALL otherwise (or if absent).
+static NTSTATUS dev_prop_query(struct winwdf_device *dev, const unsigned char key[20], ULONG buf_len, void *buf, ULONG *result_len, ULONG *prop_type) {
+    cant_fail_ret(pthread_mutex_lock(&dev->props_lock));
+    struct dev_prop_node *n = dev_prop_find(dev, key);
+    NTSTATUS res;
+    if(!n) {
+        if(result_len) *result_len = 0;
+        res = STATUS_BUFFER_TOO_SMALL;
+    } else {
+        if(result_len) *result_len = n->data_len;
+        if(prop_type) *prop_type = n->type;
+        if(buf && buf_len >= n->data_len) {
+            if(n->data_len) memcpy(buf, n->data, n->data_len);
+            res = STATUS_SUCCESS;
+        } else res = STATUS_BUFFER_TOO_SMALL;
+    }
+    cant_fail_ret(pthread_mutex_unlock(&dev->props_lock));
+    return res;
+}
+
+//Return a stored property value as a freshly allocated WDFMEMORY. Sets *prop_type
+//if non-NULL. Returns SUCCESS if found, BUFFER_TOO_SMALL otherwise.
+static NTSTATUS dev_prop_alloc_query(struct winwdf_device *dev, const unsigned char key[20], void **memory, ULONG *prop_type) {
+    cant_fail_ret(pthread_mutex_lock(&dev->props_lock));
+    struct dev_prop_node *n = dev_prop_find(dev, key);
+    NTSTATUS res = STATUS_BUFFER_TOO_SMALL;
+    if(n) {
+        WDFOBJECT mem = wdf_create_memory(&dev->object, n->data, n->data_len);
+        if(mem) {
+            if(memory) *memory = mem;
+            if(prop_type) *prop_type = n->type;
+            res = STATUS_SUCCESS;
+        }
+    }
+    cant_fail_ret(pthread_mutex_unlock(&dev->props_lock));
+    return res;
+}
+
+__winfnc NTSTATUS WdfDeviceAssignInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG type, ULONG buf_len, void *buf) {
+    struct winwdf_device *dev = (struct winwdf_device*) device_obj;
+    struct tudor_iface_prop_data *pd = property_data;
+    log_dev_prop("AssignInterfaceProperty", device_obj, pd ? pd->PropertyKey : NULL, buf_len, buf);
+    if(pd && pd->PropertyKey) dev_prop_assign(dev, pd->PropertyKey, type, buf, buf_len);
     return STATUS_SUCCESS;
 }
 WDFFUNC(WdfDeviceAssignInterfaceProperty, 50)
 
-__winfnc NTSTATUS WdfDeviceAllocAndQueryInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG pool_type, WDF_OBJECT_ATTRIBUTES *property_memory_attrs, WDFOBJECT *property_memory, ULONG *type) {
-    log_debug("WdfDeviceAllocAndQueryInterfaceProperty called - stubbed");
-    if(type) *type = 0;
-    return 0xC0000225;
+__winfnc NTSTATUS WdfDeviceAllocAndQueryInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG pool_type, void *mem_attrs, void **memory, ULONG *prop_type) {
+    struct winwdf_device *dev = (struct winwdf_device*) device_obj;
+    struct tudor_iface_prop_data *pd = property_data;
+    log_dev_prop("AllocAndQueryInterfaceProperty", device_obj, pd ? pd->PropertyKey : NULL, 0, NULL);
+    if(!pd || !pd->PropertyKey) return STATUS_BUFFER_TOO_SMALL;
+    return dev_prop_alloc_query(dev, pd->PropertyKey, memory, prop_type);
 }
 WDFFUNC(WdfDeviceAllocAndQueryInterfaceProperty, 51)
 
-__winfnc NTSTATUS WdfDeviceQueryInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG buffer_length, void *property_buffer, ULONG *result_length, ULONG *type) {
-    log_debug("WdfDeviceQueryInterfaceProperty called - stubbed");
-    if(result_length) *result_length = 0;
-    if(type) *type = 0;
-    return 0xC0000225;
+__winfnc NTSTATUS WdfDeviceQueryInterfaceProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG buf_len, void *buf, ULONG *result_len, ULONG *prop_type) {
+    struct winwdf_device *dev = (struct winwdf_device*) device_obj;
+    struct tudor_iface_prop_data *pd = property_data;
+    log_dev_prop("QueryInterfaceProperty", device_obj, pd ? pd->PropertyKey : NULL, buf_len, NULL);
+    if(!pd || !pd->PropertyKey) { if(result_len) *result_len = 0; return STATUS_BUFFER_TOO_SMALL; }
+    return dev_prop_query(dev, pd->PropertyKey, buf_len, buf, result_len, prop_type);
 }
 WDFFUNC(WdfDeviceQueryInterfaceProperty, 52)
+
+__winfnc NTSTATUS WdfDeviceQueryPropertyEx(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG buf_len, void *buf, ULONG *result_len, ULONG *prop_type) {
+    struct winwdf_device *dev = (struct winwdf_device*) device_obj;
+    struct tudor_dev_prop_data *pd = property_data;
+    log_dev_prop("QueryPropertyEx", device_obj, pd ? pd->PropertyKey : NULL, buf_len, NULL);
+    if(!pd || !pd->PropertyKey) { if(result_len) *result_len = 0; return STATUS_BUFFER_TOO_SMALL; }
+    return dev_prop_query(dev, pd->PropertyKey, buf_len, buf, result_len, prop_type);
+}
+WDFFUNC(WdfDeviceQueryPropertyEx, 54)
+
+__winfnc NTSTATUS WdfDeviceAllocAndQueryPropertyEx(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG pool_type, void *mem_attrs, void **memory, ULONG *prop_type) {
+    struct winwdf_device *dev = (struct winwdf_device*) device_obj;
+    struct tudor_dev_prop_data *pd = property_data;
+    log_dev_prop("AllocAndQueryPropertyEx", device_obj, pd ? pd->PropertyKey : NULL, 0, NULL);
+    if(!pd || !pd->PropertyKey) return STATUS_BUFFER_TOO_SMALL;
+    return dev_prop_alloc_query(dev, pd->PropertyKey, memory, prop_type);
+}
+WDFFUNC(WdfDeviceAllocAndQueryPropertyEx, 55)
+
+__winfnc NTSTATUS WdfDeviceAssignProperty(WDF_DRIVER_GLOBALS *globals, WDFOBJECT device_obj, void *property_data, ULONG type, ULONG buf_len, void *buf) {
+    struct winwdf_device *dev = (struct winwdf_device*) device_obj;
+    struct tudor_dev_prop_data *pd = property_data;
+    log_dev_prop("AssignProperty", device_obj, pd ? pd->PropertyKey : NULL, buf_len, buf);
+    if(pd && pd->PropertyKey) dev_prop_assign(dev, pd->PropertyKey, type, buf, buf_len);
+    return STATUS_SUCCESS;
+}
+WDFFUNC(WdfDeviceAssignProperty, 56)

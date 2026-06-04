@@ -66,6 +66,8 @@ struct wdf_memory {
     bool owns_data;
 };
 
+WDFOBJECT wdf_create_memory(struct wdf_object *parent, const void *data, size_t size);
+
 //Drivers
 HANDLE wdf_get_driver_reg_key(struct winwdf_driver *driver);
 

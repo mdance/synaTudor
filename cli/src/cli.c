@@ -27,6 +27,7 @@ void cli_main_loop(struct tudor_device *device) {
         puts("  i - identify finger");
         puts("  q - query information about enrolled fingers");
         puts("  w - wipe enrolled finger(s)");
+        puts("  x - erase on-device template database (clears a full sensor)");
         puts("  s - shutdown driver");
 
         printf("> ");
@@ -212,6 +213,27 @@ void cli_main_loop(struct tudor_device *device) {
                 //Wipe records
                 int num_wiped = tudor_wipe_records(device, all_guids ? NULL: &guid, finger);
                 printf("Succesfully wiped %d enrolled finger(s)\n", num_wiped);
+            } goto cmdend;
+            case 'x': {
+                //Ask for confirmation - this wipes ALL on-device templates
+                printf("Erase the ENTIRE on-device template database (all enrolled fingers on the sensor)?\n");
+                printf("y/n: ");
+                char yn = getchar();
+                while(!abort_cmd_loop && isspace(yn)) yn = getchar();
+                while(!abort_cmd_loop && getchar() != '\n') continue;
+                if(yn != 'y') {
+                    puts("Aborted on-device erase");
+                    goto cmdend;
+                }
+
+                if(tudor_erase_db(device)) {
+                    //On-device templates are gone; drop the host records too so the
+                    //two stores stay in sync.
+                    int num_wiped = tudor_wipe_records(device, NULL, TUDOR_FINGER_ANY);
+                    printf("Erased on-device database and %d host record(s)\n", num_wiped);
+                } else {
+                    puts("Failed to erase on-device database!");
+                }
             } goto cmdend;
             case 's': abort_cmd_loop = true; goto cmdend;
             default: printf("Unknown command '%c'!\n", cmd);
