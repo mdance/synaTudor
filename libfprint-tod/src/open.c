@@ -271,12 +271,12 @@ void open_device(FpiDeviceTudor *tdev, GAsyncReadyCallback callback, gpointer us
         return;
     }
 
-    //Create a sleep inhibitor
+    //Create a sleep inhibitor. This needs logind; if it's unavailable (e.g. the
+    //session bus has no logind, or a minimal test harness), don't fail the whole
+    //device - we just won't inhibit sleep during operations.
     if(!create_sleep_inhibitor(tdev, &error)) {
-        dispose_dev(tdev);
-        g_task_return_error(task, error);
-        g_object_unref(task);
-        return;
+        g_warning("Couldn't create sleep inhibitor (continuing without suspend handling): %s", error ? error->message : "?");
+        g_clear_error(&error);
     }
 
     GUsbDevice *usb_dev = fpi_device_get_usb_device(FP_DEVICE(tdev));
