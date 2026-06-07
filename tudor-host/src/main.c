@@ -192,10 +192,13 @@ int main() {
     }
     log_info("Opened tudor device");
 
-    //Check that we have determined the sensor name
+    //The sensor name is normally learned when the DLL accesses the pairing-data
+    //registry (which only happens while (re)pairing an unpaired device). For an
+    //already-paired sensor with no host-side pairing data the DLL never does
+    //this, but the on-device session is still usable for enroll/identify. Don't
+    //hard-fail; just warn. (The name is only needed to persist pairing data.)
     if(!has_sensor_name) {
-        log_error("Failed to acquire sensor name!");
-        return EXIT_FAILURE;
+        log_warn("Sensor name not acquired (already-paired device); continuing without pairing-data persistence");
     }
 
     //Send ready message

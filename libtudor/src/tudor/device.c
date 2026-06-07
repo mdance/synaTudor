@@ -426,22 +426,24 @@ static void verify_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) 
         log_error("Error finishing sensor capture: 0x%x! [reject detail 0x%x]", hres, reject_detail);
         goto exit;
     };
-    if((hres = tudor_sensor_adapter->PushDataToEngine(res->dev->pipeline, WINBIO_PURPOSE_VERIFY, 0, &reject_detail)) != ERROR_SUCCESS) {
+    if((hres = tudor_sensor_adapter->PushDataToEngine(res->dev->pipeline, WINBIO_PURPOSE_IDENTIFY, 0, &reject_detail)) != ERROR_SUCCESS) {
         if(hres == WINBIO_E_BAD_CAPTURE) retry = true;
         log_error("Error pushing sensor data to engine: 0x%x! [reject detail 0x%x]", hres, reject_detail);
         goto exit;
     };
 
-    log_debug("Verifying sample...");
-    BOOLEAN is_match;
+    //Implement verify as an on-chip identify + GUID/finger comparison. The DLL's
+    //VerifyFeatureSet path is broken for this sensor (always BAD_CAPTURE), while
+    //IdentifyFeatureSet works, so verify against a known identity by identifying
+    //and checking the result matches the requested GUID + finger.
+    log_debug("Verifying sample (via identify)...");
+    WINBIO_IDENTITY identity;
+    UCHAR subfactor;
     UCHAR *payload_ptr, *hash_ptr;
     SIZE_T payload_size, hash_size;
-    if((hres = tudor_engine_adapter->VerifyFeatureSet(res->dev->pipeline, &(WINBIO_IDENTITY) {
-        .Type = WINBIO_ID_TYPE_GUID,
-        .TemplateGuid = *(GUID*) &res->args.verify.guid
-    }, (UCHAR) res->args.verify.finger, &is_match, &payload_ptr, &payload_size, &hash_ptr, &hash_size, &reject_detail)) != ERROR_SUCCESS) {
+    if((hres = tudor_engine_adapter->IdentifyFeatureSet(res->dev->pipeline, &identity, &subfactor, &payload_ptr, &payload_size, &hash_ptr, &hash_size, &reject_detail)) != ERROR_SUCCESS) {
         if(hres == WINBIO_E_BAD_CAPTURE) retry = true;
-        if(hres == WINBIO_E_NO_MATCH) {
+        if(hres == WINBIO_E_UNKNOWN_ID) {
             success = true;
             matches = false;
             goto exit;
@@ -452,7 +454,9 @@ static void verify_cb(OVERLAPPED *ovlp, NTSTATUS status, tudor_async_res_t res) 
     };
 
     success = true;
-    matches = is_match;
+    matches = (identity.Type == WINBIO_ID_TYPE_GUID &&
+               memcmp(&identity.TemplateGuid, &res->args.verify.guid, sizeof(GUID)) == 0 &&
+               (enum tudor_finger) subfactor == res->args.verify.finger);
 
     exit:;
     *(res->args.verify.retry) = retry;
@@ -474,7 +478,8 @@ bool tudor_verify(struct tudor_device *device, RECGUID guid, enum tudor_finger f
 
     log_debug("Capturing sample...");
     OVERLAPPED *ovlp;
-    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->StartCapture, device->pipeline, WINBIO_PURPOSE_VERIFY, &ovlp);
+    // Capture with IDENTIFY purpose - verify is implemented via identify (see verify_cb).
+    WINBIO_CALL_PIPELINE(tudor_sensor_adapter->StartCapture, device->pipeline, WINBIO_PURPOSE_IDENTIFY, &ovlp);
 
     *res = async_new_res(device, ovlp);
     (*res)->args.verify = (struct async_args_verify) { .retry = retry, .guid = guid, .finger = finger, .matches = matches };

@@ -223,7 +223,10 @@ void activate_sandbox() {
     cant_fail(setrlimit(RLIMIT_DATA, &(struct rlimit) { .rlim_cur = SANDBOX_DATA_LIMIT, .rlim_max = SANDBOX_DATA_LIMIT }));
     cant_fail(setrlimit(RLIMIT_STACK, &(struct rlimit) { .rlim_cur = SANDBOX_STACK_LIMIT, .rlim_max = SANDBOX_STACK_LIMIT }));
     cant_fail(setrlimit(RLIMIT_NOFILE, &(struct rlimit) { .rlim_cur = SANDBOX_MAX_FDS, .rlim_max = SANDBOX_MAX_FDS }));
-    cant_fail(setrlimit(RLIMIT_NPROC, &(struct rlimit) { .rlim_cur = SANDBOX_MAX_THREADS, .rlim_max = SANDBOX_MAX_THREADS }));
+    // No RLIMIT_NPROC cap: the DLL spawns (and is slow to reap) many worker
+    // threads per capture, so a single enroll can transiently need hundreds.
+    // The host is short-lived (one fprintd op) and memory is otherwise bounded,
+    // so inherit the high default rather than aborting mid-enroll (matches the CLI).
     cant_fail(setrlimit(RLIMIT_FSIZE, &(struct rlimit) { .rlim_cur = 0, .rlim_max = 0 }));
 
     //Setup UID / GID
