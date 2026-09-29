@@ -18,8 +18,12 @@ bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const cha
         return true;
     }
 
-    //Handle the driver configuration key
+    //Handle the driver configuration key. Windows installs of the HP 06cb:00e7
+    //driver have no such key; TUDOR_SYNA_WBF=0 reports it absent to match that.
     if(!is_write && strcmp(key_name, "HKEY_LOCAL_MACHINE\\SOFTWARE\\Syna") == 0) {
+        const char *syna_wbf = getenv("TUDOR_SYNA_WBF");
+        if(syna_wbf && syna_wbf[0] == '0') return false;
+
         if(strcmp(val_name, "wbfMode") == 0) {
             if(buf && *buf_size >= 4) {
                 *((uint32_t*) buf) = TRUE;
