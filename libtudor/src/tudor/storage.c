@@ -1,6 +1,75 @@
 #include "internal.h"
 
+bool tudor_uses_native_storage(struct tudor_device *device) {
+    return device && device->pipeline && tudor_native_storage_adapter && device->pipeline->StorageInterface == tudor_native_storage_adapter;
+}
+
+//The native storage adapter rejects wildcard deletes (E_INVALIDARG), so query
+//the matching records first and delete each concrete identity/subfactor
+static int tudor_wipe_native_records(struct tudor_device *device, RECGUID *guid, enum tudor_finger finger) {
+    winmodule_set_cur(&tudor_adapter_dll->module);
+    WINBIO_STORAGE_INTERFACE *storage = device->pipeline->StorageInterface;
+
+    WINBIO_IDENTITY query = {0};
+    if(guid) {
+        query.Type = WINBIO_ID_TYPE_GUID;
+        query.TemplateGuid = *(GUID*) guid;
+    } else query.Type = WINBIO_ID_TYPE_WILDCARD;
+
+    HRESULT hres = storage->QueryBySubject(device->pipeline, &query, (UCHAR) finger);
+    if(hres == WINBIO_E_DATABASE_NO_SUCH_RECORD || hres == WINBIO_E_DATABASE_NO_RESULTS) return 0;
+    if(hres == ERROR_SUCCESS) hres = storage->FirstRecord(device->pipeline);
+    if(hres == WINBIO_E_DATABASE_NO_RESULTS) return 0;
+    if(hres != ERROR_SUCCESS) {
+        log_error("Native storage record query failed: 0x%x!", hres);
+        return -1;
+    }
+
+    struct { WINBIO_IDENTITY identity; UCHAR subfactor; } *recs = NULL;
+    size_t num_recs = 0;
+    while(true) {
+        WINBIO_STORAGE_RECORD rec = {0};
+        if((hres = storage->GetCurrentRecord(device->pipeline, &rec)) != ERROR_SUCCESS || !rec.Identity) {
+            log_error("Native storage current record failed: 0x%x!", hres);
+            free(recs);
+            return -1;
+        }
+
+        void *nrecs = realloc(recs, (num_recs + 1) * sizeof(*recs));
+        if(!nrecs) { perror("Couldn't allocate native record list"); abort(); }
+        recs = nrecs;
+        recs[num_recs].identity = *rec.Identity;
+        recs[num_recs].subfactor = rec.SubFactor;
+        num_recs++;
+
+        hres = storage->NextRecord(device->pipeline);
+        if(hres == WINBIO_E_DATABASE_NO_MORE_RECORDS || hres == WINBIO_E_DATABASE_NO_RESULTS) break;
+        if(hres != ERROR_SUCCESS) {
+            log_error("Native storage next record failed: 0x%x!", hres);
+            free(recs);
+            return -1;
+        }
+    }
+
+    int num_deleted = 0;
+    for(size_t i = 0; i < num_recs; i++) {
+        if((hres = storage->DeleteRecord(device->pipeline, &recs[i].identity, recs[i].subfactor)) != ERROR_SUCCESS) {
+            log_error("Native storage record delete failed: 0x%x!", hres);
+            continue;
+        }
+        num_deleted++;
+    }
+    free(recs);
+
+    if(num_deleted > 0 && tudor_engine_adapter->RefreshCache && (hres = tudor_engine_adapter->RefreshCache(device->pipeline)) != ERROR_SUCCESS)
+        log_warn("Engine cache refresh failed after native delete: 0x%x", hres);
+
+    return num_deleted;
+}
+
 int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_finger finger) {
+    if(tudor_uses_native_storage(device)) return tudor_wipe_native_records(device, guid, finger);
+
     cant_fail_ret(pthread_mutex_lock(&device->records_lock));
 
     //Find the record
@@ -27,6 +96,9 @@ int tudor_wipe_records(struct tudor_device *device, RECGUID *guid, enum tudor_fi
 }
 
 bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_finger finger, const void *data, size_t data_size) {
+    //Records live in the sensor-backed native storage, not on the host
+    if(tudor_uses_native_storage(device)) return true;
+
     cant_fail_ret(pthread_mutex_lock(&device->records_lock));
 
     //Check for duplicate record

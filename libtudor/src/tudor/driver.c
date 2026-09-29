@@ -42,6 +42,7 @@ typedef BOOL __winfnc (*api_DllMain)(HANDLE hinstDLL, int fdwReason, void *lpRes
 struct windrv_dll *tudor_adapter_dll, *tudor_driver_dll;
 WINBIO_SENSOR_INTERFACE *tudor_sensor_adapter;
 WINBIO_ENGINE_INTERFACE *tudor_engine_adapter;
+WINBIO_STORAGE_INTERFACE *tudor_native_storage_adapter;
 
 static DRIVER_OBJECT umdf_driver;
 struct winwdf_driver *tudor_wdf_driver;
@@ -133,6 +134,19 @@ bool tudor_init() {
     if((hres = ((api_WbioQueryEngineInterface) find_dll_export(&tudor_adapter_dll->image, "WbioQueryEngineInterface"))(&tudor_engine_adapter)) != 0) {
         log_error("Error querying engine interface: 0x%x!", hres);
         return false;
+    }
+
+    //Prefer the adapter DLL's own storage interface - it is what Windows uses,
+    //and it keeps the sensor's template registrations valid across opens.
+    //TUDOR_HOST_STORAGE=1 forces the host-only storage adapter instead.
+    tudor_native_storage_adapter = NULL;
+    const char *force_host = getenv("TUDOR_HOST_STORAGE");
+    api_WbioQueryStorageInterface query_storage = (api_WbioQueryStorageInterface) try_find_dll_export(&tudor_adapter_dll->image, "WbioQueryStorageInterface");
+    if(query_storage && !(force_host && force_host[0] == '1')) {
+        if((hres = query_storage(&tudor_native_storage_adapter)) != 0) {
+            log_warn("Error querying native storage interface: 0x%x; falling back to host storage", hres);
+            tudor_native_storage_adapter = NULL;
+        } else log_info("Using native storage interface [version %u.%u]", tudor_native_storage_adapter->Version.MajorVersion, tudor_native_storage_adapter->Version.MinorVersion);
     }
 
     return true;

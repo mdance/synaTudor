@@ -167,6 +167,56 @@ bool tudor_register_ondevice_template(struct tudor_device *device, WINBIO_IDENTI
     return true;
 }
 
+static bool tudor_open_native_database(struct tudor_device *device) {
+    //Database ID the Windows WinBio configuration assigns to the 06cb:00e7
+    //sensor (Enum\USB\VID_06CB&PID_00E7\...\WinBio\Configurations\0)
+    GUID database_id = DEFINE_GUID(4CD81755, 1411, 4BB1, A230, D6ED329E025C);
+
+    char *owned_path = NULL;
+    const char *path = getenv("TUDOR_NATIVE_STORAGE_PATH");
+    if(!path || !path[0]) {
+        const char *state_dir = getenv("STATE_DIRECTORY");
+        if(state_dir && state_dir[0]) {
+            if(asprintf(&owned_path, "%s/native-storage.dat", state_dir) < 0) { perror("Couldn't allocate native storage path"); return false; }
+            path = owned_path;
+        } else path = "/var/lib/tudor/native-storage.dat";
+    }
+
+    char16_t *database_path = winstr_from_str(path);
+    char16_t *connect_string = winstr_from_str("");
+    free(owned_path);
+    if(!database_path || !connect_string) {
+        perror("Couldn't allocate native storage strings");
+        free(database_path);
+        free(connect_string);
+        return false;
+    }
+
+    WINBIO_REGISTERED_FORMAT standard_format = {0};
+    GUID vendor_format = {0};
+    HRESULT hres;
+    if(tudor_engine_adapter->QueryPreferredFormat && (hres = tudor_engine_adapter->QueryPreferredFormat(device->pipeline, &standard_format, &vendor_format)) != ERROR_SUCCESS)
+        log_warn("Native storage preferred format query failed: 0x%x", hres);
+
+    hres = device->pipeline->StorageInterface->OpenDatabase(device->pipeline, &database_id, database_path, connect_string);
+    if(hres != ERROR_SUCCESS) {
+        log_info("Native storage database open failed [0x%x], creating it...", hres);
+        hres = device->pipeline->StorageInterface->CreateDatabase(device->pipeline, &database_id, WINBIO_TYPE_FINGERPRINT, &vendor_format, database_path, connect_string, 0, 0);
+    }
+    free(database_path);
+    free(connect_string);
+    if(hres != ERROR_SUCCESS) {
+        log_error("Native storage database open/create failed: 0x%x!", hres);
+        return false;
+    }
+
+    if(tudor_engine_adapter->RefreshCache && (hres = tudor_engine_adapter->RefreshCache(device->pipeline)) != ERROR_SUCCESS)
+        log_warn("Engine cache refresh failed: 0x%x", hres);
+
+    log_info("Opened native storage database");
+    return true;
+}
+
 bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, struct tudor_device_state *state) {
     HRESULT hres;
     NTSTATUS status;
@@ -214,21 +264,21 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     *device->pipeline = (WINBIO_PIPELINE) {0};
     device->pipeline->EngineInterface = tudor_engine_adapter;
     device->pipeline->SensorInterface = tudor_sensor_adapter;
-    device->pipeline->StorageInterface = tudor_storage_adapter;
+    device->pipeline->StorageInterface = tudor_native_storage_adapter ? tudor_native_storage_adapter : tudor_storage_adapter;
     device->pipeline->SensorHandle = device->winbio_file = winio_create_file(device, true, NULL, NULL, (winio_devctrl_fnc*) tudor_devctrl, (winio_cancel_fnc*) tudor_cancel, (winio_cleanup_fnc*) tudor_cleanup, NULL);
     device->pipeline->EngineHandle = INVALID_HANDLE_VALUE;
     device->pipeline->StorageHandle = INVALID_HANDLE_VALUE;
-    device->pipeline->StorageContext = device;
+    device->pipeline->StorageContext = tudor_native_storage_adapter ? NULL : device;
 
     log_debug("Attaching interfaces to pipeline...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Attach, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->Attach, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->Attach, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->Attach, device->pipeline);
 
     log_debug("Initializing pipeline interfaces...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->PipelineInit, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->PipelineInit, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->PipelineInit, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->PipelineInit, device->pipeline);
 
     //Reset the sensor
     log_debug("Resetting sensor...");
@@ -238,7 +288,9 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
     log_debug("Activating pipeline...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Activate, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->Activate, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->Activate, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->Activate, device->pipeline);
+
+    if(tudor_uses_native_storage(device) && !tudor_open_native_database(device)) return false;
 
     //Check the sensor status
     log_debug("Checking sensor status...");
@@ -259,20 +311,24 @@ bool tudor_close(struct tudor_device *device) {
 
     //Deactivate the pipeline
     log_debug("Deactivating pipeline...");
+    if(tudor_uses_native_storage(device) && device->pipeline->StorageHandle != INVALID_HANDLE_VALUE) {
+        if((hres = device->pipeline->StorageInterface->CloseDatabase(device->pipeline)) != ERROR_SUCCESS)
+            log_warn("Error closing native storage database: 0x%x", hres);
+    }
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Deactivate, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->Deactivate, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->Deactivate, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->Deactivate, device->pipeline);
 
     //Uninitialize the pipeline
     log_debug("Uninitializing pipeline interfaces...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->PipelineCleanup, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->PipelineCleanup, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->PipelineCleanup, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->PipelineCleanup, device->pipeline);
 
     log_debug("Detaching interfaces from pipeline...");
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->Detach, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->Detach, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->Detach, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->Detach, device->pipeline);
     free(device->pipeline);
 
     winhandle_destroy(device->winbio_file);
@@ -312,7 +368,7 @@ bool tudor_enroll_start(struct tudor_device *device, RECGUID guid, enum tudor_fi
     //Follow https://docs.microsoft.com/en-us/windows/win32/secbiomet/adapter-workflow - WinBioEnrollBegin
     WINBIO_CALL_PIPELINE(tudor_sensor_adapter->ClearContext, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->ClearContext, device->pipeline);
-    WINBIO_CALL_PIPELINE(tudor_storage_adapter->ClearContext, device->pipeline);
+    WINBIO_CALL_PIPELINE(device->pipeline->StorageInterface->ClearContext, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->CreateEnrollment, device->pipeline);
     WINBIO_CALL_PIPELINE(tudor_engine_adapter->SetEnrollmentParameters, device->pipeline, &(WINBIO_EXTENDED_ENROLLMENT_PARAMETERS) {
         .Size = sizeof(WINBIO_EXTENDED_ENROLLMENT_PARAMETERS),
@@ -416,6 +472,9 @@ bool tudor_enroll_commit(struct tudor_device *device, bool *is_duplicate) {
         if(hres == WINBIO_E_DUPLICATE_ENROLLMENT) *is_duplicate = true;
         return false;
     }
+
+    if(tudor_uses_native_storage(device) && tudor_engine_adapter->RefreshCache && (hres = tudor_engine_adapter->RefreshCache(device->pipeline)) != ERROR_SUCCESS)
+        log_warn("Engine cache refresh failed after enrollment: 0x%x", hres);
 
     device->enrolling = false;
     return true;
