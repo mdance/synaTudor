@@ -77,7 +77,11 @@ bool winreg_write_val(HANDLE hkey, const char *val_name, const void *buf, size_t
 
     //Forward to registry handler
     bool suc = reg_handler(reg_context, key->ctx_obj, key->name, val_name, true, (void*) buf, &buf_size, &val_type);
-    log_verbose("REGWRITE | ctx %18p key '%s' value '%s' val type %d buf size %lu suc %d", key->ctx_obj, key->name, val_name, val_type, buf_size, suc);
+    if(val_type == WINREG_DWORD && buf && buf_size == 4) {
+        log_verbose("REGWRITE | ctx %18p key '%s' value '%s' val type %d buf size %lu suc %d value %u", key->ctx_obj, key->name, val_name, val_type, buf_size, suc, *(const uint32_t*) buf);
+    } else {
+        log_verbose("REGWRITE | ctx %18p key '%s' value '%s' val type %d buf size %lu suc %d", key->ctx_obj, key->name, val_name, val_type, buf_size, suc);
+    }
     return suc;
 }
 

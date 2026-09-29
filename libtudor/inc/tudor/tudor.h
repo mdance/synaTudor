@@ -69,6 +69,8 @@ struct tudor_record {
     size_t data_size;
 };
 
+#define TUDOR_TEMPLATE_ID_SIZE 16
+
 struct tudor_device {
     struct tudor_device_state state;
 
@@ -85,6 +87,8 @@ struct tudor_device {
     bool enrolling;
     RECGUID enroll_guid;
     enum tudor_finger enroll_finger;
+    uint8_t enroll_template_id[TUDOR_TEMPLATE_ID_SIZE];
+    bool has_enroll_template_id;
 
     //Database records
     pthread_mutex_t records_lock;
