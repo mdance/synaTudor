@@ -102,8 +102,14 @@ void wdf_destroy_obj_list(struct wdf_object_list *list) {
     //Destroy objects
     cant_fail_ret(pthread_rwlock_wrlock(&list->lock));
 
+    //Objects don't unlink themselves from a dead list, so advance the head before destroying each one
     list->dead = true;
-    while(list->head) winwdf_destroy_object(list->head);
+    while(list->head) {
+        struct wdf_object *obj = list->head;
+        list->head = obj->next;
+        if(list->head) list->head->prev = NULL;
+        winwdf_destroy_object(obj);
+    }
 
     cant_fail_ret(pthread_rwlock_unlock(&list->lock));
 
