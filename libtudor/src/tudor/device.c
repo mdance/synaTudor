@@ -464,10 +464,13 @@ bool tudor_enroll_commit(struct tudor_device *device, bool *is_duplicate) {
     log_debug("Committing enrollment...");
 
     //The driver doesn't support enrollment hashes (so we don't call GetEnrollmentHash)
-    if((hres = tudor_engine_adapter->CommitEnrollment(device->pipeline, &(WINBIO_IDENTITY) {
-        .Type = WINBIO_ID_TYPE_GUID,
-        .TemplateGuid = *(GUID*) &device->enroll_guid
-    }, (UCHAR) device->enroll_finger, NULL, 0)) != ERROR_SUCCESS) {
+    //Zero the whole identity - a compound literal only initializes the union's
+    //GUID member, and the full structure is sent to the sensor
+    WINBIO_IDENTITY commit_ident;
+    memset(&commit_ident, 0, sizeof(commit_ident));
+    commit_ident.Type = WINBIO_ID_TYPE_GUID;
+    commit_ident.TemplateGuid = *(GUID*) &device->enroll_guid;
+    if((hres = tudor_engine_adapter->CommitEnrollment(device->pipeline, &commit_ident, (UCHAR) device->enroll_finger, NULL, 0)) != ERROR_SUCCESS) {
         log_error("Error commiting enrollment: 0x%x!", hres);
         if(hres == WINBIO_E_DUPLICATE_ENROLLMENT) *is_duplicate = true;
         return false;
