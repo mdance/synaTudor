@@ -142,20 +142,5 @@ bool tudor_reg_handler(void *ctx, void *ctx_obj, const char *key_name, const cha
         return false;
     }
 
-    //Provide a stable MachineGuid for device pairing
-    if(!is_write && strcmp(key_name, "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography") == 0) {
-        if(strcmp(val_name, "MachineGuid") == 0) {
-            const char *guid = "{4c4c4544-0000-2010-8020-cac04f000000}";
-            size_t guid_len = strlen(guid) + 1;
-            if(buf && *buf_size >= guid_len) {
-                memcpy(buf, guid, guid_len);
-            } else if(buf) return false;
-            *buf_size = guid_len;
-            *val_type = WINREG_STR;
-            return true;
-        }
-        return false;
-    }
-
     return false;
 }
