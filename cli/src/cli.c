@@ -27,7 +27,7 @@ void cli_main_loop(struct tudor_device *device) {
         puts("  i - identify finger");
         puts("  q - query information about enrolled fingers");
         puts("  w - wipe enrolled finger(s)");
-        puts("  x - erase on-device template database (clears a full sensor)");
+        puts("  x - erase on-device template database (clears a full sensor, needs TUDOR_ALLOW_ERASE_DB=1)");
         puts("  s - shutdown driver");
 
         printf("> ");
@@ -219,6 +219,15 @@ void cli_main_loop(struct tudor_device *device) {
                 printf("Succesfully wiped %d enrolled finger(s)\n", num_wiped);
             } goto cmdend;
             case 'x': {
+                //On 06cb:00e7 this also erases the sensor's pairing partition, so the next
+                //open re-pairs the sensor, which drops every enrolled finger
+                const char *allow_erase = getenv("TUDOR_ALLOW_ERASE_DB");
+                if(!allow_erase || allow_erase[0] != '1') {
+                    puts("Refusing to erase the on-device database: on some sensors (e.g. 06cb:00e7) it also erases the pairing,");
+                    puts("which makes the next start re-pair the sensor and drop all enrolled fingers. Set TUDOR_ALLOW_ERASE_DB=1 to override.");
+                    goto cmdend;
+                }
+
                 //Ask for confirmation - this wipes ALL on-device templates
                 printf("Erase the ENTIRE on-device template database (all enrolled fingers on the sensor)?\n");
                 printf("y/n: ");
