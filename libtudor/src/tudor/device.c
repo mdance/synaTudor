@@ -1,18 +1,7 @@
 #include <unistd.h>
 #include "internal.h"
 
-struct devctrl_ctx {
-    struct tudor_device *device;
-    OVERLAPPED *ovlp;
-    ULONG code;
-};
-
-static void req_cb(struct winwdf_request *req, NTSTATUS status, struct devctrl_ctx *ctx) {
-    struct tudor_device *device = ctx->device;
-    OVERLAPPED *ovlp = ctx->ovlp;
-    ULONG code = ctx->code;
-    free(ctx);
-
+static void req_cb(struct winwdf_request *req, NTSTATUS status, OVERLAPPED *ovlp) {
     //Get request info
     const void *out_buf = NULL;
     size_t out_buf_size, num_transfered = 0;
@@ -32,17 +21,6 @@ static void req_cb(struct winwdf_request *req, NTSTATUS status, struct devctrl_c
         cant_fail_ret(pthread_mutex_unlock(&LOG_LOCK));
     }
 
-    //Remember the on-chip template ID the sensor reports once an enrollment has
-    //collected enough samples (UpdateEnrollment: +0x04 u32 ID length, +0x08 ID),
-    //so it can be stored in the host record and re-registered on later opens
-    if(code == 0x442010 && status == STATUS_SUCCESS && num_transfered >= 0x8 + TUDOR_TEMPLATE_ID_SIZE) {
-        const uint8_t *out = (const uint8_t*) out_buf;
-        if(*(const uint32_t*) (out + 0x4) == TUDOR_TEMPLATE_ID_SIZE) {
-            memcpy(device->enroll_template_id, out + 0x8, TUDOR_TEMPLATE_ID_SIZE);
-            device->has_enroll_template_id = true;
-        }
-    }
-
     //Complete the OVERLAPPED
     winio_complete_overlapped(ovlp, status, num_transfered);
 }
@@ -56,9 +34,6 @@ static NTSTATUS tudor_devctrl(struct tudor_device *device, OVERLAPPED *ovlp, ULO
         cant_fail_ret(pthread_mutex_unlock(&LOG_LOCK));
     }
 
-    //A new enrollment invalidates the template ID captured for the previous one
-    if(code == 0x44200c) device->has_enroll_template_id = false;
-
     //Start the request
     struct winmodule *mod = winmodule_get_cur();
     winmodule_set_cur(&tudor_driver_dll->module);
@@ -66,12 +41,7 @@ static NTSTATUS tudor_devctrl(struct tudor_device *device, OVERLAPPED *ovlp, ULO
     winmodule_set_cur(mod);
 
     //Add callback
-    if(status == STATUS_SUCCESS) {
-        struct devctrl_ctx *ctx = malloc(sizeof(struct devctrl_ctx));
-        if(!ctx) { perror("Couldn't allocate DEVCTRL context"); abort(); }
-        *ctx = (struct devctrl_ctx) { .device = device, .ovlp = ovlp, .code = code };
-        winwdf_add_request_callback(*req, (winwdf_request_cb_fnc*) req_cb, ctx);
-    }
+    if(status == STATUS_SUCCESS) winwdf_add_request_callback(*req, (winwdf_request_cb_fnc*) req_cb, ovlp);
 
     return status;
 }
@@ -173,7 +143,6 @@ bool tudor_open(struct tudor_device *device, libusb_device_handle *usb_dev, stru
 
     device->state = state ? *state : (struct tudor_device_state) {0};
     device->enrolling = false;
-    device->has_enroll_template_id = false;
     cant_fail_ret(pthread_mutex_init(&device->records_lock, NULL));
     device->records_head = NULL;
     device->result_records_head = device->result_records_cursor = NULL;

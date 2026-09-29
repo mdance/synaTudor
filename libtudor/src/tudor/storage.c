@@ -41,7 +41,7 @@ bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_fing
     struct tudor_record *rec = malloc(sizeof(struct tudor_record));
     if(!rec) { perror("Couldn't allocate record"); abort(); }
 
-    rec->identity = (WINBIO_IDENTITY*) calloc(1, sizeof(WINBIO_IDENTITY));
+    rec->identity = (WINBIO_IDENTITY*) malloc(sizeof(WINBIO_IDENTITY));
     if(!rec->identity) { perror("Couldn't allocate record identity"); abort(); }
     rec->identity->Type = WINBIO_ID_TYPE_GUID;
     rec->identity->TemplateGuid = *(GUID*) (void*) &guid;
@@ -60,14 +60,6 @@ bool tudor_add_record(struct tudor_device *device, RECGUID guid, enum tudor_fing
     device->records_head = rec;
 
     cant_fail_ret(pthread_mutex_unlock(&device->records_lock));
-
-    //Enrollments on this sensor don't survive the reset done when the device is
-    //opened, so re-register records which carry the sensor's template ID
-    if(data_size == TUDOR_TEMPLATE_ID_SIZE) {
-        if(!tudor_register_ondevice_template(device, rec->identity, (unsigned char) finger, data, data_size))
-            log_warn("Couldn't re-register on-device template for guid=%08x... finger=%x", guid.PartA, finger);
-    }
-
     return true;
 }
 
@@ -165,25 +157,19 @@ __winfnc static HRESULT storage_AddRecord(WINBIO_PIPELINE *pipeline, WINBIO_STOR
     rec->finger = (enum tudor_finger) srec->SubFactor;
 
     // For on-device storage (Prometheus), the DLL provides TemplateBlobSize=0.
-    // Store the sensor's template ID (captured from UpdateEnrollment) so the
-    // registration can be replayed on later opens, or else a 1-byte placeholder
-    // so the record still exists (count=0 causes "no match").
-    const void *store_data = srec->TemplateBlob;
-    size_t store_size = srec->TemplateBlobSize;
-    if(store_size == 0 && dev->has_enroll_template_id) {
-        store_data = dev->enroll_template_id;
-        store_size = TUDOR_TEMPLATE_ID_SIZE;
-    }
-    rec->data = malloc(store_size > 0 ? store_size : 1);
-    rec->data_size = store_size > 0 ? store_size : 1;
+    // Store a 1-byte placeholder so IdentifyFeatureSet includes this record's
+    // GUID in the 0x442058 identify payload (count=0 causes "no match").
+    size_t store_size = srec->TemplateBlobSize > 0 ? srec->TemplateBlobSize : 1;
+    rec->data = malloc(store_size);
+    rec->data_size = store_size;
     if(!rec->data) {
         HRESULT hr = winerr_from_errno();
         free(rec);
         cant_fail_ret(pthread_mutex_unlock(&dev->records_lock));
         return hr;
     }
-    memset(rec->data, 0, rec->data_size);
-    if(store_size > 0) memcpy(rec->data, store_data, store_size);
+    memset(rec->data, 0, store_size);
+    if(srec->TemplateBlobSize > 0) memcpy(rec->data, srec->TemplateBlob, srec->TemplateBlobSize);
 
     if(dev->records_head) dev->records_head->prev = rec;
     dev->records_head = rec;
